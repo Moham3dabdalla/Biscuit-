@@ -18,7 +18,7 @@
 To install Biscuit, use npm or yarn:
 
 ```bash
-npm install biscuit-frame
+npm install biscuits-frame
 ```
 Make sure to write the name properly 
 ```javascript
