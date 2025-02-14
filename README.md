@@ -1,5 +1,3 @@
-![Biscuit Logo](https://www.freepik.com/free-photos-vectors/biscuit-logo)
-
 # Biscuit Framework
 
 🍪Biscuit is a minimal and high-performance Node.js framework built for handling HTTP requests and building APIs with a focus on simplicity, extensibility, and resource optimization. It includes built-in support for middleware, routing, validation, error handling, and more.
