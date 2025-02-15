@@ -1,6 +1,6 @@
 {
-  "name": "biscuitsJar",
-  "version": "1.0.0",
+  "name": "biscuitsjar",
+  "version": "1.0.8",
   "author": "Mohamed Abdalla",
   "description": "A minimal and high-performance Node.js framework with advanced routing, validation, middleware, and error handling.",
   "main": "index.js",
@@ -20,6 +20,7 @@
   "dependencies": {
     "@polka/parse": "^1.0.0-next.0",
     "@polka/send-type": "^0.5.2",
+    "compression": "^1.8.0",
     "find-my-way": "^9.2.0",
     "helmet": "^8.0.0",
     "jsonschema": "^1.5.0",
@@ -29,7 +30,6 @@
   "engines": {
     "node": ">=14.0.0"
   },
-  "bugs": {},
   "homepage": "https://github.com/Moham3dabdalla/Biscuit-.git",
   "private": false,
   "repository": {
