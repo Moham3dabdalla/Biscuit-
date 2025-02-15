@@ -11,25 +11,35 @@
 - **Error Handling**: Custom error handling with the ability to capture validation and server errors.
 - **Compression**: Built-in Gzip/Deflate compression support.
 - **Security**: Helmet for setting HTTP headers to enhance security.
-- **Cache**: Built-in LRU cache for improving performance with cached responses.
+- **Cache**: Built-in zlib cache for improving performance with cached responses.
+- **Utilities**: Biscuit has provided a punch of utilities of it's own jar that's help you to develope API faster
+   - rateLimit
+   - timeout
+   - get headers & set them 
+   - get the query & url & hostname &host & path
 
 ## Installation
 
 To install Biscuit, use npm or yarn:
 
 ```bash
-npm install biscuits-frame
+npm install biscuitsJar
+```
+## add the app default 
+by adding the app default it will provide you with security and zlib cache
+```javascript
+Biscuit.default(app)
 ```
 Make sure to write the name properly 
 ```javascript
-const Biscuit = require('biscuits-frame')
+const Biscuit = require('biscuitsJar')
 ```
 # Basic Usage
 
 Creating an instance of Biscuit
 
 ```javascript
-const Biscuit = require('biscuits-frame');
+const Biscuit = require('biscuitsJar');
 const app = new Biscuit();
 ```
 # Routing
@@ -77,8 +87,10 @@ app.get('/protected', (req, res, next) => {
 # Static File Serving
 
 Serve static files using the static() method:
+Make usre you have public directory inside of it index.html
+by default static will look over for index.html file
 ```javascript
-app.static('/public', path.join(__dirname, 'public'));
+app.static((path.join(__dirname, 'public'))) 
 ```
 # Validation
 
@@ -97,6 +109,17 @@ app.post('/user', app.validate(schema), (req, res) => {
   res.json({ message: 'User data is valid' });
 });
 ```
+# Utilities
+custom bulid in Utilities 
+## rateLimit
+```javascript
+app.use(app.utils.rateLimit(50, 60000));
+```
+## timeout
+```javascript
+app.use(app.utils.timeout(3000)); 
+```
+
 # Error Handling
 
 Custom error handling is provided out-of-the-box for both validation and server errors:
@@ -132,25 +155,6 @@ app.close(() => {
   console.log('Server closed');
 });
 ```
-# Configuration
-
-You can configure various settings such as:
-
-Views Directory: Default is views in the current working directory.
-
-Cache: LRU Cache with configurable max size and TTL.
-
-Security Headers: Automatically includes Helmet for security headers.
-
-```javascript
-app.settings = {
-  views: path.join(process.cwd(), 'views'),
-  'x-powered-by': false,
-  env: process.env.NODE_ENV || 'development',
-  cache: new LRUCache({ max: 1000, ttl: 3600000 }),
-  'view cache': true
-};
-```
 # Methods
 
 get(path, ...handlers)
@@ -185,6 +189,58 @@ close(callback)
 
 Stops the server and performs cleanup.
 
+# Full Example of Use
+```javascript
+const Biscuit = require('biscuitsJar');
+const app = new Biscuit();
+
+
+Biscuit.defaults(app);
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path}`);
+  next();
+});
+
+ 
+const userSchema = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    email: { type: 'string', format: 'email' },
+  },
+  required: ['name', 'email'],
+};
+
+app.post('/users', app.validate(userSchema), (req, res) => {
+  const { name, email } = req.body;
+  res.status(201).json({ message: 'User created successfully', user: { name, email } });
+});
+
+
+app.get('/users', (req, res) => {
+  res.json([{ id: 1, name: 'Alice', email: 'alice@example.com' }]);
+});
+
+
+app.listen(3000, () => console.log('Biscuits server running on http://localhost:3000'));
+```
+in your terminal run the following to test
+```terminal
+add user 
+curl -X POST http://localhost:3000/users \
+-H "Content-Type: application/json" \
+-d '{"name": "John Doe"}'
+
+get users
+curl http://localhost:3000/users
+
+add invalid user it will throw an err 
+curl -X POST http://localhost:3000/users \
+-H "Content-Type: application/json" \
+-d '{"name": "John Doe"}'
+
+```
 # License
 
 Biscuit is released under the MIT License.
