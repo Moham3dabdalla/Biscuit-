@@ -1,372 +1,218 @@
-const { createServer } = require('http');
-const Router = require('find-my-way');
-const EventEmitter = require('events');
+'use strict'
+ /**
+ * Biscuit v-1.0.0
+ * Arthor : Mohamed Abdalla
+ * license: MIT
+ * Build : 15-2-2025
+ */
+
+const http = require('http');
 const { Validator, ValidationError } = require('jsonschema');
 const helmet = require('helmet');
-const compress = require('compression');
-const path = require('path');
-const { LRUCache } = require('lru-cache');
+const zlib = require('zlib'); // استبدال compression بـ zlib
+const Router = require('find-my-way');
+const { parse } = require('querystring');
+const send = require('@polka/send-type');
 const serveStatic = require('serve-static');
-const { pipeline } = require('stream/promises');
-const { Writable } = require('stream');
+const BiscuitsJar = require('./BiscuitsJar'); // استيراد BiscuitsJar
 
-class CustomValidationError extends ValidationError {
-  constructor(errors) {
-    super(errors);
-    this.statusCode = 400;
-    this.error_code = 'VALIDATION_FAILED';
-    this.details = errors.map(err => ({
-      field: err.property.replace(/^instance\./, ''),
-      message: err.message
-    }));
+class BiscuitError extends Error {
+  constructor(message, code = 'SERVER_ERROR', status = 500, details) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.details = details;
   }
 }
 
-class TrieNode {
+class Biscuit {
   constructor() {
-    this.staticChildren = new Map();
-    this.dynamicChild = null;
-    this.handlers = new Map();
-  }
-}
-
-class TrieCache {
-  constructor() {
-    this.root = new TrieNode();
+    this.globalMiddlewares = [];
+    this.router = Router();
+    this.validator = new Validator();
+    this.settings = { env: process.env.NODE_ENV || 'development' };
+    this.utils = BiscuitsJar; // إضافة BiscuitsJar كـ utilities
   }
 
-  add(method, path, handler) {
-    const parts = path.split('/').filter(Boolean);
-    let node = this.root;
-
-    for (let part of parts) {
-      if (part.startsWith(':')) {
-        if (!node.dynamicChild) {
-          node.dynamicChild = new TrieNode();
-          node.dynamicChild.paramName = part.slice(1);
-        }
-        node = node.dynamicChild;
-      } else {
-        if (!node.staticChildren.has(part)) {
-          node.staticChildren.set(part, new TrieNode());
-        }
-        node = node.staticChildren.get(part);
-      }
-    }
-
-    node.handlers.set(method, handler);
+  // --- Middleware Handling ---
+  use(middleware) {
+    this.globalMiddlewares.push(middleware);
+    return this;
   }
 
-  get(method, path) {
-    const parts = path.split('/').filter(Boolean);
-    let node = this.root;
-    const params = {};
-
-    for (const part of parts) {
-      if (node.staticChildren.has(part)) {
-        node = node.staticChildren.get(part);
-      } else if (node.dynamicChild) {
-        node = node.dynamicChild;
-        params[node.paramName] = part;
-      } else {
-        return null;
-      }
-    }
-
-    return node.handlers.get(method) ? { handler: node.handlers.get(method), params } : null;
-  }
-}
-
-class Biscuits extends EventEmitter {
-  constructor() {
-    super();
-    this.router = Router({ defaultRoute: this._send404.bind(this) });
-    this.trieCache = new TrieCache();
-    this.globalMiddleware = [];
-    this.errorHandlers = [];
-    this._validator = new Validator();
-    this.settings = {
-      views: path.join(process.cwd(), 'views'),
-      'x-powered-by': false,
-      env: process.env.NODE_ENV || 'development',
-      cache: new LRUCache({ max: 1000, ttl: 3600000 }),
-      'view cache': true,
-    };
-    this._templateCache = new LRUCache({ max: 500, ttl: 86400000 });
-    this.server = null;
-    this._sigintHandler = () => this.close();
-    this._sigtermHandler = () => this.close();
-
-    this._applyCoreMiddleware();
-  }
-
-  _enhanceResponse(res) {
-    if (res._enhanced) return;
-    res._enhanced = true;
-
-    res.status = function(statusCode) {
-      this.statusCode = statusCode;
-      return this;
-    };
-
-    res.send = function(body) {
-      if (body instanceof Buffer) {
-        if (!this.getHeader('Content-Type')) {
-          this.setHeader('Content-Type', 'application/octet-stream');
-        }
-        return this.end(body);
-      }
-
-      let type = this.getHeader('Content-Type');
-      if (!type) {
-        if (typeof body === 'object' && body !== null) {
-          if (Buffer.isBuffer(body)) {
-            type = 'application/octet-stream';
-          } else {
-            type = 'application/json';
-            body = JSON.stringify(body);
-          }
-        } else if (typeof body === 'string') {
-          type = /^\s*</.test(body) ? 'text/html' : 'text/plain';
-        } else {
-          body = body.toString();
-          type = 'text/plain';
-        }
-        this.setHeader('Content-Type', type);
-      }
-      this.end(body);
-    };
-
-    res.json = function(obj) {
-      this.setHeader('Content-Type', 'application/json');
-      this.end(JSON.stringify(obj));
-    };
-
-    res.set = function(field, value) {
-      if (typeof field === 'object') {
-        Object.entries(field).forEach(([key, val]) => {
-          this.setHeader(key, val);
-        });
-      } else {
-        this.setHeader(field, value);
-      }
-      return this;
-    };
-
-    res.redirect = function(...args) {
-      let status = 302;
-      let url;
-      if (args.length === 1) {
-        url = args[0];
-      } else {
-        status = args[0];
-        url = args[1];
-      }
-      this.statusCode = status;
-      this.setHeader('Location', url);
-      this.end();
-    };
-  }
-
-  async _parseBody(req) {
-    if (req.method === 'GET' || req.method === 'DELETE') return null;
-    if (!req.headers['content-type']?.includes('application/json')) return {};
-
-    return new Promise(async (resolve, reject) => {
-      const chunks = [];
-      const writable = new Writable({
-        write(chunk, encoding, callback) {
-          chunks.push(chunk);
-          callback();
-        }
-      });
-
-      try {
-        await pipeline(req, writable);
-        const data = Buffer.concat(chunks).toString();
-        resolve(data ? JSON.parse(data) : {});
-      } catch (err) {
-        reject(new CustomValidationError([{ message: 'Invalid JSON payload' }]));
-      }
+  // --- Route Registration ---
+  route(method, path, ...handlers) {
+    const wrappedHandlers = [...this.globalMiddlewares, ...handlers];
+    this.router.on(method, path, (req, res, params) => {
+      req.params = params;
+      this._executeHandlers(req, res, wrappedHandlers);
     });
+    return this;
   }
 
-  async _executeMiddlewareStack(req, res, middlewares) {
-    let index = 0;
-    const next = async (err) => {
-      if (err) throw err;
-      if (index >= middlewares.length) return;
-      const layer = middlewares[index++];
-      try {
-        await layer(req, res, next);
-      } catch (error) {
-        await next(error);
+  get(path, ...handlers) { return this.route('GET', path, ...handlers); }
+  post(path, ...handlers) { return this.route('POST', path, ...handlers); }
+  put(path, ...handlers) { return this.route('PUT', path, ...handlers); }
+  delete(path, ...handlers) { return this.route('DELETE', path, ...handlers); }
+
+  // --- Enhanced Validation ---
+  validate(schema) {
+    return (req, res, next) => {
+      const result = this.validator.validate(req.body, schema);
+      if (!result.valid) {
+        const errors = result.errors.map(err => ({
+          field: err.property.replace('instance.', ''),
+          message: err.message
+        }));
+        throw new BiscuitError('Validation failed', 'VALIDATION_ERROR', 400, errors);
       }
-    };
-    await next();
-  }
-
-  _addRoute(method, path, ...handlers) {
-    const wrappedHandler = this._wrapHandlers(handlers);
-    this.router.on(method, path, wrappedHandler);
-    this.trieCache.add(method, path, wrappedHandler);
-  }
-
-  _wrapHandlers(handlers) {
-    return async (req, res, params, next) => {
-      try {
-        req.params = params;
-        req.body = await this._parseBody(req);
-
-        const execute = async (index) => {
-          if (index >= handlers.length) return next?.();
-          const handler = handlers[index];
-          await handler(req, res, () => execute(index + 1));
-        };
-
-        await execute(0);
-      } catch (err) {
-        this._handleError(err, req, res);
-      }
+      next();
     };
   }
 
-  _handleError(err, req, res) {
-    if (!res.writable || res.headersSent) return;
-
-    if (err instanceof CustomValidationError) {
-      res.status(err.statusCode).json({
-        error: err.message,
-        error_code: err.error_code,
-        details: err.details
-      });
-      return;
-    }
-
-    this.emit('error', err);
-    res.status(500).json({
-      error: 'Internal Server Error',
-      error_code: 'SERVER_ERROR'
-    });
-  }
-
-  async _handleRequest(req, res) {
-    this._enhanceResponse(res);
+  // --- Improved Request Handling ---
+  async handle(req, res) {
     try {
-      await this._executeMiddlewareStack(req, res, this.globalMiddleware);
-      await this._executeRouteHandlers(req, res);
+      this._enhance(req, res);
+      await this._parseBody(req);
+      this.router.lookup(req, res);
     } catch (err) {
       this._handleError(err, req, res);
     }
   }
 
-  async _executeRouteHandlers(req, res) {
-    const route = this.trieCache.get(req.method, req.url);
-    if (route) {
-      await route.handler(req, res, route.params);
-    } else {
-      this.router.lookup(req, res);
-    }
+  // --- Optimized Server Initialization with Graceful Shutdown ---
+  listen(...args) {
+    const server = http.createServer((req, res) => this.handle(req, res));
+
+    // Graceful shutdown logic
+    const gracefulShutdown = () => {
+      console.log('Shutting down gracefully...');
+      server.close(() => {
+        console.log('Server closed.');
+      });
+
+      // Force close server after 10 seconds
+      setTimeout(() => {
+        console.error('Could not close connections in time, forcefully shutting down');
+      }, 10000);
+    };
+
+    // Handle shutdown signals
+    process.on('SIGINT', gracefulShutdown);
+    process.on('SIGTERM', gracefulShutdown);
+
+    // Start the server
+    return server.listen.apply(server, args);
   }
 
-  _send404(req, res) {
-    if (!res.writableEnded) {
-      res.statusCode = 404;
-      res.end('Not Found');
-    }
-  }
+  // --- Enhanced Internal Utilities ---
+  _enhance(req, res) {
+    // Improved URL parsing with query support
+    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+    req.path = parsedUrl.pathname;
+    req.query = parse(parsedUrl.searchParams.toString()); // Better query parsing
+    req.search = parsedUrl.search;
 
-  use(...args) {
-    if (typeof args[0] === 'string') {
-      const [routePath, ...handlers] = args;
-      this.router.on(['GET', 'POST', 'PUT', 'DELETE'], routePath, this._wrapHandlers(handlers));
-    } else {
-      this.globalMiddleware.push((req, res, next) => args[0](req, res, next));
-    }
-    return this;
-  }
+    // Unified response handler
+    res.send = (data, status = 200) => {
+      send(res, status, data);
+    };
 
-  get(path, ...handlers) { this._addRoute('GET', path, ...handlers); return this; }
-  post(path, ...handlers) { this._addRoute('POST', path, ...handlers); return this; }
-  put(path, ...handlers) { this._addRoute('PUT', path, ...handlers); return this; }
-  delete(path, ...handlers) { this._addRoute('DELETE', path, ...handlers); return this; }
+    res.status = code => {
+      res.statusCode = code;
+      return res;
+    };
 
-  validate(schema, asyncValidators = []) {
-    if (schema.$id && !this._validator.getSchema(schema.$id)) {
-      this._validator.addSchema(schema, schema.$id);
-    }
-    
-    return async (req, res) => {
-      const result = this._validator.validate(
-        { body: req.body, params: req.params },
-        schema.$id ? { $ref: schema.$id } : schema
-      );
-      if (result.errors.length > 0) throw new CustomValidationError(result.errors);
-
-      for (const validator of asyncValidators) {
-        await validator(req);
-      }
+    res.json = data => {
+      send(res, res.statusCode || 200, data);
     };
   }
 
-  _applyCoreMiddleware() {
-    this.use(helmet({ contentSecurityPolicy: false }));
-    this.use(compress({
-      level: 6,
-      threshold: '1kb',
-      filter: (req, res) => {
-        const type = res.getHeader('Content-Type') || '';
-        return type.startsWith('text/') || 
-               type.includes('json') || 
-               type.includes('javascript');
-      }
-    }));
+  // --- Async Handler Execution ---
+  async _executeHandlers(req, res, handlers) {
+    const next = async (index = 0) => {
+      if (index >= handlers.length) return;
+      const handler = handlers[index];
+      await handler(req, res, () => next(index + 1));
+    };
+
+    try {
+      await next();
+    } catch (err) {
+      this._handleError(err, req, res);
+    }
   }
 
-  static(prefix, rootPath, options = { 
-    etag: true,
-    lastModified: true,
-    maxAge: '1d',
-    cacheControl: true
-  }) {
-    if (arguments.length === 1) {
-      rootPath = prefix;
-      prefix = '/';
-    }
-    const staticHandler = serveStatic(path.resolve(rootPath), {
-      ...options,
-      async: true
-    });
+  // --- Robust Body Parsing ---
+  async _parseBody(req) {
+    return new Promise((resolve, reject) => {
+      if (['GET', 'HEAD'].includes(req.method)) {
+        req.body = {};
+        return resolve();
+      }
 
-    this.use(prefix, (req, res, next) => {
-      return new Promise((resolve) => {
-        staticHandler(req, res, (err) => {
-          if (err) next(err);
-          else resolve();
-        });
+      let data = '';
+      req.on('data', chunk => data += chunk);
+      req.on('end', () => {
+        try {
+          req.body = data ? JSON.parse(data) : {};
+          resolve();
+        } catch (err) {
+          reject(new BiscuitError('Invalid JSON', 'INVALID_JSON', 400));
+        }
       });
     });
+  }
+
+  static(directory, options = {}) {
+    const staticMiddleware = serveStatic(directory, options);
+    this.use(staticMiddleware);
     return this;
   }
 
-  listen(port, callback) {
-    this.server = createServer(this._handleRequest.bind(this));
-    this.server.listen(port, callback);
+  // --- Error Handling ---
+  _handleError(err, req, res) {
+    const error = err instanceof BiscuitError ? err :
+      new BiscuitError(err.message, 'INTERNAL_ERROR', 500);
 
-    process.on('SIGINT', this._sigintHandler);
-    process.on('SIGTERM', this._sigtermHandler);
-  }
-
-  close(callback) {
-    if (this.server) {
-      this.server.close(() => {
-        process.off('SIGINT', this._sigintHandler);
-        process.off('SIGTERM', this._sigtermHandler);
-        this.emit('close');
-        if (callback) callback();
-      });
-    }
+    // إلقاء الخطأ بدلاً من إرسال رد إلى العميل
+    console.error('Error:', error.message, error.details);
+    throw error; // إلقاء الخطأ
   }
 }
 
-module.exports = Biscuits;
+// --- Default Setup ---
+Biscuit.defaults = (app) => {
+  app.use(helmet());
+
+  app.use((req, res, next) => {
+    const acceptEncoding = req.headers['accept-encoding'] || '';
+    let stream;
+
+    if (acceptEncoding.includes('gzip')) {
+      res.setHeader('Content-Encoding', 'gzip');
+      stream = zlib.createGzip();
+    } else if (acceptEncoding.includes('deflate')) {
+      res.setHeader('Content-Encoding', 'deflate');
+      stream = zlib.createDeflate();
+    }
+
+    if (stream) {
+      const originalWrite = res.write.bind(res);
+      const originalEnd = res.end.bind(res);
+
+      stream.on('data', (chunk) => originalWrite(chunk));
+      stream.on('end', () => originalEnd());
+
+      res.write = (data) => stream.write(data);
+      res.end = (data) => {
+        if (data) stream.write(data);
+        stream.end();
+      };
+    }
+
+    next();
+  });
+};
+module.exports = Biscuit;
