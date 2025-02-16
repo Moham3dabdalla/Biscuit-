@@ -123,20 +123,29 @@ app.use(app.utils.timeout(3000));
 
 Custom error handling is provided out-of-the-box for both validation and server errors:
 ```javascript
-app.use((err, req, res, next) => {
-  if (err instanceof CustomValidationError) {
-    return res.status(err.statusCode).json({
-      error: err.message,
-      error_code: err.error_code,
-      details: err.details
-    });
-  }
-  
-  res.status(500).json({
-    error: 'Internal Server Error',
-    error_code: 'SERVER_ERROR'
-  });
+const Biscuit = require('./Biscuit');
+const app = new Biscuit();
+
+app.get('/example', (req, res) => {
+  throw new Biscuit.BiscuitError('Something went wrong!', 'EXAMPLE_ERROR', 400);
 });
+
+app.listen(3000, () => console.log('Server running on port 3000'));
+```
+### As Middleware
+```javascript
+app.use((req, res, next) => {
+  if (!req.headers['authorization']) {
+    throw new Biscuit.BiscuitError('Unauthorized', 'AUTH_ERROR', 401);
+  }
+  next();
+});
+```
+### Custom handle 
+```javascript
+app._handleError = (err, req, res) => {
+  res.status(500).json({ error: 'Custom Error Handler', details: err.message });
+};
 ```
 # Server
 
@@ -240,11 +249,13 @@ curl -X POST http://localhost:3000/users \
 -d '{"name": "John Doe"}'
 
 ```
+We only believe to try not to see Here the benchmark Url for Biscuit tested your self
 
+[Biscuits benchmark repository](https://github.com/Moham3dabdalla/Biscuit-benchmark)
 
 # License
 
-Biscuit is released under the MIT License.
+Biscuit is released under the [MIT](https://github.com/Moham3dabdalla/Biscuit-/blob/main/.LICENSE) License.
 
 
 
